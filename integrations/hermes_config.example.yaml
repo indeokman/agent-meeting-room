@@ -1,0 +1,12 @@
+# Hermes (Nous Hermes Agent / 사내 Hermes 클라이언트) MCP 연동 예시
+# 각 팀원은 본인의 담당 agent_id (agent_a | agent_b | agent_c | agent_d)로 변경하여 등록하세요.
+
+mcp_servers:
+  agent_meeting_room:
+    transport: streamable_http
+    url: "http://YOUR_LINUX_SERVER_IP:8080/mcp?agent_id=agent_a&client=Hermes"
+    timeout: 1800
+
+# 구버전 SSE 전용 클라이언트를 사용하는 경우 아래 URL을 사용하세요:
+#   transport: sse
+#   url: "http://YOUR_LINUX_SERVER_IP:8080/mcp/sse?agent_id=agent_a&client=Hermes"

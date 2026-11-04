@@ -1,0 +1,24 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tsbuildinfo
+
+# Virtual environments & dependencies
+.venv/
+venv/
+node_modules/
+wheels/
+
+# Runtime state, databases & embedded VCS runtime store
+data/
+data_e2e_tmp/
+*.db
+*.db-shm
+*.db-wal
+
+# Packaged archives (attached via GitHub Releases instead)
+dist_package/
+
+# Note: frontend/dist/ is intentionally tracked so corporate Linux servers
+# can run `./deploy/start_linux.sh` directly without Node.js / npm installed.
