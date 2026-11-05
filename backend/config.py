@@ -9,6 +9,19 @@ DEFAULT_DATA_DIR = BASE_DIR / "data"
 
 
 @dataclass
+class ModePaths:
+    root_dir: Path
+    db_path: Path
+    config_repo_dir: Path
+    benchmark_logs_dir: Path
+
+    def ensure_dirs(self) -> None:
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+        self.config_repo_dir.mkdir(parents=True, exist_ok=True)
+        self.benchmark_logs_dir.mkdir(parents=True, exist_ok=True)
+
+
+@dataclass
 class Settings:
     host: str = field(default_factory=lambda: os.getenv("AMR_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(os.getenv("AMR_PORT", "8080")))
@@ -36,17 +49,27 @@ class Settings:
         default_factory=lambda: int(os.getenv("AMR_MAX_DISCUSSION_ROUNDS", "2"))
     )
 
+    def get_mode_paths(self, mode: str = "live") -> ModePaths:
+        sub = "sim" if mode == "sim" else "live"
+        root = self.data_dir / sub
+        return ModePaths(
+            root_dir=root,
+            db_path=root / "agent_meeting_room.db",
+            config_repo_dir=root / "config_repo",
+            benchmark_logs_dir=root / "benchmark_logs",
+        )
+
     @property
     def db_path(self) -> Path:
-        return self.data_dir / "agent_meeting_room.db"
+        return self.get_mode_paths("live").db_path
 
     @property
     def config_repo_dir(self) -> Path:
-        return self.data_dir / "config_repo"
+        return self.get_mode_paths("live").config_repo_dir
 
     @property
     def benchmark_logs_dir(self) -> Path:
-        return self.data_dir / "benchmark_logs"
+        return self.get_mode_paths("live").benchmark_logs_dir
 
     @property
     def static_dir(self) -> Path:
@@ -54,8 +77,8 @@ class Settings:
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.config_repo_dir.mkdir(parents=True, exist_ok=True)
-        self.benchmark_logs_dir.mkdir(parents=True, exist_ok=True)
+        self.get_mode_paths("live").ensure_dirs()
+        self.get_mode_paths("sim").ensure_dirs()
 
 
 settings = Settings()

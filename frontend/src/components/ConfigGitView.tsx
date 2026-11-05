@@ -171,19 +171,25 @@ export function ConfigGitView({
                 감시 중인 서버 설정 파일 목록
               </div>
               <div className="space-y-1">
-                {Object.keys(filesMap).map((path) => (
-                  <button
-                    key={path}
-                    onClick={() => handleSelectFile(path)}
-                    className={`w-full rounded-xl px-3 py-2 text-left font-mono text-xs transition ${
-                      selectedFile === path
-                        ? 'bg-indigo-600/25 font-semibold text-indigo-200 ring-1 ring-indigo-500/40'
-                        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                    }`}
-                  >
-                    {path}
-                  </button>
-                ))}
+                {Object.keys(filesMap).length === 0 ? (
+                  <div className="py-4 text-center text-xs text-slate-500">
+                    아직 동기화된 설정 파일이 없습니다. 서버 연결 후 새로고침하거나 에이전트가 설정을 배포하면 자동 기록됩니다.
+                  </div>
+                ) : (
+                  Object.keys(filesMap).map((path) => (
+                    <button
+                      key={path}
+                      onClick={() => handleSelectFile(path)}
+                      className={`w-full rounded-xl px-3 py-2 text-left font-mono text-xs transition ${
+                        selectedFile === path
+                          ? 'bg-indigo-600/25 font-semibold text-indigo-200 ring-1 ring-indigo-500/40'
+                          : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                      }`}
+                    >
+                      {path}
+                    </button>
+                  ))
+                )}
               </div>
             </div>
 

@@ -1,6 +1,7 @@
 import {
   Bot,
   CheckCircle2,
+  ClipboardList,
   Clock,
   FileBarChart2,
   Hash,
@@ -9,7 +10,6 @@ import {
   Play,
   Plus,
   Send,
-  Sparkles,
   Terminal,
   User,
   Wrench,
@@ -19,6 +19,7 @@ import { api } from '../api'
 import type {
   AgentInfo,
   ChatMessage,
+  RequiredRoleInfo,
   RoomInfo,
   ScenarioCampaign,
   SshAuditLog,
@@ -26,6 +27,7 @@ import type {
 
 interface Props {
   userProfile: string
+  requiredRoles: RequiredRoleInfo[]
   agents: AgentInfo[]
   rooms: RoomInfo[]
   selectedRoomId: string
@@ -37,12 +39,28 @@ interface Props {
   onRefreshBootstrap: () => void
 }
 
-const ROLE_NAME_MAP: Record<string, string> = {
-  ROLE_ORCH: '총괄·벤치마크',
-  ROLE_GPU: 'GPU 서버',
-  ROLE_REMOTE: '리모트·메모리',
-  ROLE_CONFIG: 'DGD·YAML',
-}
+const DEFAULT_REQUIRED_ROLES: RequiredRoleInfo[] = [
+  {
+    code: 'ROLE_ORCH',
+    name: '총괄 · 벤치마크 진행',
+    description: '논의 취합, 시나리오 제안서 작성, 벤치마크 구동 및 리포트 발행',
+  },
+  {
+    code: 'ROLE_GPU',
+    name: 'GPU 서버 점검·제어',
+    description: 'GPU 토폴로지(TP4 등), VRAM/클럭 및 K8s GPU 파드 상태 점검',
+  },
+  {
+    code: 'ROLE_REMOTE',
+    name: '리모트 · 메모리 서버 제어',
+    description: 'Mooncake Store, CXL Memory·DRAM·NVMe SSD 및 RDMA 점검',
+  },
+  {
+    code: 'ROLE_CONFIG',
+    name: 'DGD · YAML 설정 구성',
+    description: 'K8s DGD 매니페스트 및 LMCache/Mooncake YAML 작성·배포',
+  },
+]
 
 const WORKFLOW_STEPS = [
   { key: 'IDLE', label: '대기' },
@@ -60,6 +78,7 @@ const QUICK_TOPICS = [
 
 export function MeetingRoomView({
   userProfile,
+  requiredRoles,
   agents,
   rooms,
   selectedRoomId,
@@ -70,6 +89,11 @@ export function MeetingRoomView({
   onJumpToReport,
   onRefreshBootstrap,
 }: Props) {
+  const roleCatalog =
+    requiredRoles.length > 0 ? requiredRoles : DEFAULT_REQUIRED_ROLES
+  const roleNameMap = Object.fromEntries(
+    roleCatalog.map((r) => [r.code, r.name]),
+  )
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [showDrawer, setShowDrawer] = useState(true)
@@ -100,20 +124,6 @@ export function MeetingRoomView({
     }
   }
 
-  const handleSimulate = async () => {
-    if (!currentRoom) return
-    try {
-      await api.simulateMeeting(
-        userProfile,
-        currentRoom.id,
-        input.trim() || undefined,
-      )
-      setInput('')
-    } catch (err) {
-      alert(`시뮬레이션 시작 실패: ${err}`)
-    }
-  }
-
   const handleCreateRoom = async () => {
     const name = newRoomName.trim()
     if (!name) return
@@ -140,30 +150,31 @@ export function MeetingRoomView({
 
   return (
     <div className="flex h-[calc(100vh-3.75rem)] overflow-hidden">
-      {/* Left Sidebar: Agents Presence + Channels */}
-      <aside className="flex w-76 shrink-0 flex-col border-r border-slate-800 bg-slate-900/70">
-        <div className="border-b border-slate-800 p-4">
-          <div className="mb-2.5 flex items-center justify-between">
+      {/* Left Sidebar: Agents Presence + Shared Role Pool + Channels */}
+      <aside className="flex w-80 shrink-0 flex-col overflow-y-auto border-r border-slate-800 bg-slate-900/70">
+        {/* 1. Connected Agents Status */}
+        <div className="border-b border-slate-800 p-3.5">
+          <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-bold tracking-wider text-slate-400 uppercase">
-              에이전트 4인방 접속 & 역할 현황
+              에이전트 접속 현황
             </span>
             <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] text-slate-300">
               온라인 {agents.filter((a) => a.status !== 'OFFLINE').length}/4
             </span>
           </div>
-          <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-1.5">
             {agents.map((ag) => {
               const isOnline = ag.status !== 'OFFLINE'
               const isWorking = ag.status === 'WORKING'
               return (
                 <div
                   key={ag.id}
-                  className="rounded-xl border border-slate-800/90 bg-slate-950/70 p-2.5"
+                  className="rounded-xl border border-slate-800/90 bg-slate-950/70 p-2"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-between gap-1">
+                    <div className="flex items-center gap-1.5">
                       <span
-                        className={`h-2.5 w-2.5 rounded-full ${
+                        className={`h-2 w-2 shrink-0 rounded-full ${
                           isWorking
                             ? 'animate-pulse bg-sky-400'
                             : isOnline
@@ -184,19 +195,14 @@ export function MeetingRoomView({
                       ag.assigned_roles.map((rc) => (
                         <span
                           key={rc}
-                          className={`rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
-                            rc === ag.primary_role
-                              ? 'bg-indigo-500/20 text-indigo-300'
-                              : 'bg-amber-500/20 text-amber-300'
-                          }`}
+                          className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300"
                         >
-                          {ROLE_NAME_MAP[rc] ?? rc}
-                          {rc !== ag.primary_role ? ' (겸임)' : ''}
+                          {roleNameMap[rc] ?? rc}
                         </span>
                       ))
                     ) : (
                       <span className="text-[10px] text-slate-500">
-                        기본 주특기: {ROLE_NAME_MAP[ag.primary_role] ?? ag.primary_role}
+                        역할 미정 (논의로 결정)
                       </span>
                     )}
                   </div>
@@ -206,7 +212,56 @@ export function MeetingRoomView({
           </div>
         </div>
 
-        <div className="flex-1 space-y-5 overflow-y-auto p-3">
+        {/* 2. Role Pool to Divide Through Discussion */}
+        <div className="border-b border-slate-800 p-3.5">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-xs font-bold tracking-wider text-slate-400 uppercase">
+              <ClipboardList className="h-3.5 w-3.5 text-indigo-400" />
+              분담 대상 역할 목록
+            </span>
+            <span className="text-[10px] text-slate-500">논의로 배정</span>
+          </div>
+          <div className="space-y-1.5">
+            {roleCatalog.map((role) => {
+              const holders = agents.filter((a) =>
+                a.assigned_roles.includes(role.code),
+              )
+              const inDiscussion = currentRoom?.workflow_state === 'DISCUSSION'
+              return (
+                <div
+                  key={role.code}
+                  className="rounded-xl border border-slate-800/90 bg-slate-950/70 px-2.5 py-2"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-200">
+                      {role.name}
+                    </span>
+                    {holders.length > 0 ? (
+                      <span className="shrink-0 rounded-md bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">
+                        {holders.map((h) => h.name).join(', ')}
+                      </span>
+                    ) : (
+                      <span
+                        className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
+                          inDiscussion
+                            ? 'animate-pulse bg-amber-500/20 text-amber-300'
+                            : 'bg-slate-800 text-slate-500'
+                        }`}
+                      >
+                        {inDiscussion ? '논의 중' : '미배정'}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-0.5 text-[10px] leading-snug text-slate-500">
+                    {role.description}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        <div className="space-y-5 p-3">
           <div>
             <div className="mb-1.5 flex items-center justify-between px-2">
               <span className="text-[11px] font-bold tracking-wider text-slate-400 uppercase">
@@ -324,16 +379,6 @@ export function MeetingRoomView({
             </div>
 
             <div className="flex items-center gap-2">
-              {currentRoom.room_type === 'group' && (
-                <button
-                  onClick={handleSimulate}
-                  className="flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/25"
-                  title="실제 터미널 연결 전에도 4개 에이전트의 회의 → 승인카드 → 병렬/순차 실행 → 리포트 전 과정을 즉시 시연합니다"
-                >
-                  <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                  4개 에이전트 협업 시뮬레이션
-                </button>
-              )}
               <button
                 onClick={() => setShowDrawer((v) => !v)}
                 className={`flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition ${

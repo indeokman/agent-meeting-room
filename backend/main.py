@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,7 +15,7 @@ from .config import settings
 from .db import Database
 from .git_store import EmbeddedGitStore
 from .mcp_endpoint import create_mcp_router
-from .orchestrator import MeetingRoomOrchestrator
+from .orchestrator import REQUIRED_ROLES, MeetingRoomOrchestrator
 from .ssh_gateway import SSHGateway
 
 
@@ -94,46 +94,68 @@ class UpsertServerPayload(BaseModel):
     host: str
     ssh_port: int = 22
     ssh_user: str = "ubuntu"
-    ssh_key_path: str = ""
     ssh_password: str | None = None
+    clear_password: bool = False
     server_role: str = "GPU"
-    connection_mode: str = "ssh"
     k8s_namespace: str = "dynamo-llm"
     watched_configs: list[dict[str, Any]] = Field(default_factory=list)
 
 
-def create_app() -> FastAPI:
-    settings.ensure_dirs()
-    ws_manager = WSManager()
-    db = Database(settings.db_path)
-    git_store = EmbeddedGitStore(settings.config_repo_dir)
-    ssh_gateway = SSHGateway(db=db, git_store=git_store, broadcast_fn=ws_manager.broadcast)
-    orchestrator = MeetingRoomOrchestrator(
-        db=db, ssh_gateway=ssh_gateway, broadcast_fn=ws_manager.broadcast
+class TestServerConnectionPayload(BaseModel):
+    id: str | None = None
+    host: str
+    ssh_port: int = 22
+    ssh_user: str = "ubuntu"
+    ssh_password: str | None = None
+
+
+class HubEnvironment:
+    """Isolated runtime environment (`live` operational mode vs `sim` functional test mode)."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = "sim" if mode == "sim" else "live"
+        is_sim = self.mode == "sim"
+        paths = settings.get_mode_paths(self.mode)
+        paths.ensure_dirs()
+
+        self.ws_manager = WSManager()
+        self.db = Database(paths.db_path, seed_demo_servers=is_sim)
+        self.git_store = EmbeddedGitStore(paths.config_repo_dir)
+        self.ssh_gateway = SSHGateway(
+            db=self.db,
+            git_store=self.git_store,
+            broadcast_fn=self.ws_manager.broadcast,
+            simulation_mode=is_sim,
+            benchmark_logs_dir=paths.benchmark_logs_dir,
+        )
+        self.orchestrator = MeetingRoomOrchestrator(
+            db=self.db,
+            ssh_gateway=self.ssh_gateway,
+            broadcast_fn=self.ws_manager.broadcast,
+            simulation_mode=is_sim,
+        )
+
+
+def create_hub_router(hub: HubEnvironment, mount_prefix: str = "") -> APIRouter:
+    router = APIRouter()
+    db = hub.db
+    git_store = hub.git_store
+    ssh_gateway = hub.ssh_gateway
+    orchestrator = hub.orchestrator
+    ws_manager = hub.ws_manager
+
+    # Mount MCP Endpoint (`/mcp` or `/sim/mcp`)
+    router.include_router(
+        create_mcp_router(
+            db=db,
+            git_store=git_store,
+            ssh_gateway=ssh_gateway,
+            orchestrator=orchestrator,
+            mount_prefix=mount_prefix,
+        )
     )
 
-    app = FastAPI(
-        title="Agent Meeting Room & LLM Memory Benchmark Hub",
-        version="1.0.0",
-    )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # Mount Single-Port MCP Endpoint (/mcp & /mcp/sse)
-    app.include_router(create_mcp_router(db, git_store, ssh_gateway, orchestrator))
-
-    # Store references on app.state for programmatic tests
-    app.state.db = db
-    app.state.git_store = git_store
-    app.state.ssh_gateway = ssh_gateway
-    app.state.orchestrator = orchestrator
-
-    @app.websocket("/ws")
+    @router.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:
         await ws_manager.connect(ws)
         try:
@@ -144,7 +166,7 @@ def create_app() -> FastAPI:
         except Exception:
             ws_manager.disconnect(ws)
 
-    @app.get("/api/bootstrap")
+    @router.get("/api/bootstrap")
     async def api_bootstrap(request: Request) -> dict[str, Any]:
         ident = resolve_identity(request)
         orchestrator.get_online_agent_ids()
@@ -153,10 +175,12 @@ def create_app() -> FastAPI:
             s["id"]: db.get_latest_snapshot(s["id"]) for s in servers
         }
         return {
+            "mode": hub.mode,
             "identity": {
                 "actor_id": ident.actor_id,
                 "auth_mode": settings.auth_mode,
             },
+            "required_roles": REQUIRED_ROLES,
             "users": db.list_users(),
             "agents": db.list_agents(),
             "rooms": db.list_rooms(),
@@ -170,12 +194,12 @@ def create_app() -> FastAPI:
             "ssh_logs": db.list_ssh_audit_logs(limit=50),
         }
 
-    @app.get("/api/rooms")
+    @router.get("/api/rooms")
     async def api_list_rooms(request: Request) -> list[dict[str, Any]]:
         resolve_identity(request)
         return db.list_rooms()
 
-    @app.post("/api/rooms")
+    @router.post("/api/rooms")
     async def api_create_room(payload: CreateRoomPayload, request: Request) -> dict[str, Any]:
         resolve_identity(request)
         room = db.create_room(
@@ -186,7 +210,7 @@ def create_app() -> FastAPI:
         await ws_manager.broadcast({"type": "room_created", "room": room})
         return room
 
-    @app.get("/api/rooms/{room_id}/messages")
+    @router.get("/api/rooms/{room_id}/messages")
     async def api_list_messages(room_id: str, request: Request) -> dict[str, Any]:
         resolve_identity(request)
         room = db.get_room(room_id)
@@ -203,7 +227,7 @@ def create_app() -> FastAPI:
             "messages": db.list_messages(room_id, limit=150),
         }
 
-    @app.post("/api/rooms/{room_id}/messages")
+    @router.post("/api/rooms/{room_id}/messages")
     async def api_post_message(
         room_id: str, payload: PostUserMessagePayload, request: Request
     ) -> dict[str, Any]:
@@ -213,7 +237,7 @@ def create_app() -> FastAPI:
             room_id=room_id, user_id=uid, content=payload.content
         )
 
-    @app.post("/api/rooms/{room_id}/simulate")
+    @router.post("/api/rooms/{room_id}/simulate")
     async def api_simulate_meeting(
         room_id: str, payload: SimulateMeetingPayload, request: Request
     ) -> dict[str, Any]:
@@ -223,7 +247,7 @@ def create_app() -> FastAPI:
             room_id=room_id, user_id=uid, topic=payload.topic
         )
 
-    @app.post("/api/campaigns/{campaign_id}/approve")
+    @router.post("/api/campaigns/{campaign_id}/approve")
     async def api_approve_campaign(
         campaign_id: str, payload: ApprovePayload, request: Request
     ) -> dict[str, Any]:
@@ -231,7 +255,7 @@ def create_app() -> FastAPI:
         uid = payload.user_id or ident.actor_id
         return await orchestrator.approve_campaign(campaign_id=campaign_id, user_id=uid)
 
-    @app.post("/api/campaigns/{campaign_id}/request-changes")
+    @router.post("/api/campaigns/{campaign_id}/request-changes")
     async def api_request_changes(
         campaign_id: str, payload: FeedbackPayload, request: Request
     ) -> dict[str, Any]:
@@ -241,19 +265,27 @@ def create_app() -> FastAPI:
             campaign_id=campaign_id, user_id=uid, feedback=payload.feedback
         )
 
-    # --- Servers & On-Demand SSH Environment Collection ---
+    # --- WinSCP-Style Servers & On-Demand SSH Environment Collection ---
 
-    @app.get("/api/servers")
+    @router.get("/api/servers")
     async def api_list_servers(request: Request) -> dict[str, Any]:
         resolve_identity(request)
         servers = db.list_servers()
         snapshots = {s["id"]: db.get_latest_snapshot(s["id"]) for s in servers}
         return {"servers": servers, "latest_snapshots": snapshots}
 
-    @app.post("/api/servers")
+    @router.post("/api/servers/test-connection")
+    async def api_test_server_connection(
+        payload: TestServerConnectionPayload, request: Request
+    ) -> dict[str, Any]:
+        resolve_identity(request)
+        return await ssh_gateway.test_connection(payload.model_dump())
+
+    @router.post("/api/servers")
     async def api_upsert_server(payload: UpsertServerPayload, request: Request) -> dict[str, Any]:
         ident = resolve_identity(request)
         srv = db.upsert_server(payload.model_dump())
+        ssh_gateway.invalidate_connection(srv["id"])
         await ws_manager.broadcast({"type": "servers_updated", "servers": db.list_servers()})
         try:
             snap_res = await ssh_gateway.collect_snapshot(
@@ -266,7 +298,15 @@ def create_app() -> FastAPI:
         except Exception as exc:
             return {"server": srv, "collect_warning": str(exc)}
 
-    @app.post("/api/servers/{server_id}/refresh")
+    @router.delete("/api/servers/{server_id}")
+    async def api_delete_server(server_id: str, request: Request) -> dict[str, Any]:
+        resolve_identity(request)
+        ssh_gateway.invalidate_connection(server_id)
+        db.delete_server(server_id)
+        await ws_manager.broadcast({"type": "servers_updated", "servers": db.list_servers()})
+        return {"deleted": server_id}
+
+    @router.post("/api/servers/{server_id}/refresh")
     async def api_refresh_server(
         server_id: str, payload: RefreshServerPayload, request: Request
     ) -> dict[str, Any]:
@@ -281,7 +321,7 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc))
 
-    @app.post("/api/servers/refresh-all")
+    @router.post("/api/servers/refresh-all")
     async def api_refresh_all_servers(
         payload: RefreshServerPayload, request: Request
     ) -> dict[str, Any]:
@@ -302,7 +342,7 @@ def create_app() -> FastAPI:
 
     # --- Embedded Git Config Explorer, Diff & 1-Click Rollback ---
 
-    @app.get("/api/configs/tree")
+    @router.get("/api/configs/tree")
     async def api_get_config_tree(request: Request, commit_hash: str | None = None) -> dict[str, Any]:
         resolve_identity(request)
         head = git_store.get_head_hash()
@@ -315,7 +355,7 @@ def create_app() -> FastAPI:
             "commits": db.list_config_commits(limit=50),
         }
 
-    @app.get("/api/configs/diff")
+    @router.get("/api/configs/diff")
     async def api_get_config_diff(
         request: Request,
         base_hash: str | None = None,
@@ -332,7 +372,7 @@ def create_app() -> FastAPI:
             base_hash=base_hash, target_hash=target_hash, server_prefix=server_id
         )
 
-    @app.post("/api/configs/update")
+    @router.post("/api/configs/update")
     async def api_update_config(payload: UpdateConfigPayload, request: Request) -> dict[str, Any]:
         ident = resolve_identity(request)
         return await ssh_gateway.update_server_config(
@@ -344,7 +384,7 @@ def create_app() -> FastAPI:
             apply_command=payload.apply_command,
         )
 
-    @app.post("/api/configs/rollback")
+    @router.post("/api/configs/rollback")
     async def api_rollback_config(payload: RollbackPayload, request: Request) -> dict[str, Any]:
         ident = resolve_identity(request)
         return await ssh_gateway.rollback_config(
@@ -355,12 +395,12 @@ def create_app() -> FastAPI:
 
     # --- Campaigns, Runs, Logs & Reports ---
 
-    @app.get("/api/ssh-logs")
+    @router.get("/api/ssh-logs")
     async def api_ssh_logs(request: Request, room_id: str | None = None) -> list[dict[str, Any]]:
         resolve_identity(request)
         return db.list_ssh_audit_logs(room_id=room_id, limit=100)
 
-    @app.get("/api/campaigns")
+    @router.get("/api/campaigns")
     async def api_campaigns(request: Request) -> dict[str, Any]:
         resolve_identity(request)
         return {
@@ -369,7 +409,7 @@ def create_app() -> FastAPI:
             "reports": db.list_reports(),
         }
 
-    @app.get("/api/runs/{run_id}/log")
+    @router.get("/api/runs/{run_id}/log")
     async def api_get_run_log(run_id: str, request: Request) -> dict[str, Any]:
         resolve_identity(request)
         run = db.get_benchmark_run(run_id)
@@ -380,7 +420,7 @@ def create_app() -> FastAPI:
             raw_text = Path(run["raw_log_path"]).read_text(encoding="utf-8", errors="replace")
         return {"run": run, "raw_log": raw_text}
 
-    @app.get("/api/reports/{report_id}/export.md")
+    @router.get("/api/reports/{report_id}/export.md")
     async def api_export_report_md(report_id: str, request: Request) -> PlainTextResponse:
         resolve_identity(request)
         report = db.get_report(report_id)
@@ -415,7 +455,41 @@ def create_app() -> FastAPI:
             },
         )
 
-    # --- Serve Built Frontend Static Bundle on the Same Single Port ---
+    return router
+
+
+def create_app() -> FastAPI:
+    settings.ensure_dirs()
+    live_hub = HubEnvironment(mode="live")
+    sim_hub = HubEnvironment(mode="sim")
+
+    app = FastAPI(
+        title="Agent Meeting Room & LLM Memory Benchmark Hub",
+        version="1.1.0",
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # 1) Simulation Mode on dedicated `/sim` route prefix (identical features, isolated DB/Git + virtual SSH)
+    app.include_router(create_hub_router(sim_hub, mount_prefix="/sim"), prefix="/sim")
+
+    # 2) Operational Mode on root `/` (real SSH + isolated production DB/Git)
+    app.include_router(create_hub_router(live_hub, mount_prefix=""))
+
+    # Expose both hubs on app.state for tests & clean shutdown
+    app.state.live_hub = live_hub
+    app.state.sim_hub = sim_hub
+    app.state.db = live_hub.db
+    app.state.git_store = live_hub.git_store
+    app.state.ssh_gateway = live_hub.ssh_gateway
+    app.state.orchestrator = live_hub.orchestrator
+
+    # --- Serve Built Frontend Static Bundle on Both `/` and `/sim` ---
     static_dir = settings.static_dir
     assets_dir = static_dir / "assets"
     if assets_dir.exists():
@@ -423,12 +497,14 @@ def create_app() -> FastAPI:
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str) -> Any:
-        if full_path.startswith(("api/", "mcp", "ws")):
+        if full_path.startswith(("api/", "mcp", "ws", "sim/api/", "sim/mcp", "sim/ws")):
             raise HTTPException(status_code=404, detail="Not Found")
         index_file = static_dir / "index.html"
         target_file = (static_dir / full_path).resolve()
         if (
             full_path
+            and full_path != "sim"
+            and not full_path.startswith("sim/")
             and str(target_file).startswith(str(static_dir.resolve()))
             and target_file.is_file()
         ):
@@ -438,8 +514,8 @@ def create_app() -> FastAPI:
         return JSONResponse(
             {
                 "status": "Agent Meeting Room Backend Running",
-                "note": "Frontend bundle not built yet in frontend/dist.",
-                "mcp_endpoint": "/mcp",
+                "modes": {"live": "/", "simulation": "/sim"},
+                "mcp_endpoints": {"live": "/mcp", "simulation": "/sim/mcp"},
             }
         )
 

@@ -2,13 +2,14 @@ import {
   BarChart3,
   Bot,
   FileCode2,
+  FlaskConical,
   MessageSquare,
   Plug,
   Server,
   UserCircle2,
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
-import { api } from './api'
+import { api, IS_SIM_MODE } from './api'
 import { ConfigGitView } from './components/ConfigGitView'
 import { EnvironmentView } from './components/EnvironmentView'
 import { McpGuideModal } from './components/McpGuideModal'
@@ -21,6 +22,7 @@ import type {
   ChatMessage,
   ConfigCommit,
   EnvSnapshot,
+  RequiredRoleInfo,
   RoomInfo,
   ScenarioCampaign,
   ServerInfo,
@@ -36,6 +38,7 @@ export function App() {
     () => localStorage.getItem('amr_user_profile') || 'member_a',
   )
   const [users, setUsers] = useState<UserProfile[]>([])
+  const [requiredRoles, setRequiredRoles] = useState<RequiredRoleInfo[]>([])
   const [agents, setAgents] = useState<AgentInfo[]>([])
   const [rooms, setRooms] = useState<RoomInfo[]>([])
   const [selectedRoomId, setSelectedRoomId] = useState<string>('room-main')
@@ -59,6 +62,7 @@ export function App() {
   const loadBootstrap = useCallback(async () => {
     const data = await api.bootstrap(userProfile)
     setUsers(data.users)
+    setRequiredRoles(data.required_roles ?? [])
     setAgents(data.agents)
     setRooms(data.rooms)
     setServers(data.servers)
@@ -90,8 +94,7 @@ export function App() {
 
   // Real-time WebSocket Stream
   useEffect(() => {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${proto}//${window.location.host}/ws`
+    const wsUrl = api.wsUrl()
     let ws: WebSocket | null = null
     let retryTimer: number | undefined
 
@@ -184,11 +187,19 @@ export function App() {
               <Bot className="h-5 w-5" />
             </div>
             <div>
-              <div className="text-sm font-extrabold tracking-tight text-white">
-                Agent Meeting Room
+              <div className="flex items-center gap-2 text-sm font-extrabold tracking-tight text-white">
+                <span>Agent Meeting Room</span>
+                {IS_SIM_MODE && (
+                  <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300">
+                    <FlaskConical className="h-3 w-3" />
+                    SIMULATION (/sim)
+                  </span>
+                )}
               </div>
               <div className="text-[10px] text-slate-400">
-                LLM Memory Benchmark & SSH Hub
+                {IS_SIM_MODE
+                  ? '기능 테스트용 시뮬레이션 경로 (운영 데이터와 분리됨)'
+                  : 'LLM Memory Benchmark & SSH Hub'}
               </div>
             </div>
           </div>
@@ -225,6 +236,15 @@ export function App() {
         </div>
 
         <div className="flex items-center gap-2.5">
+          {IS_SIM_MODE && (
+            <a
+              href="/"
+              className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800 hover:text-white"
+              title="실제 운영 경로(/)로 전환합니다"
+            >
+              운영 모드(/) 이동
+            </a>
+          )}
           <button
             onClick={() => setMcpModalOpen(true)}
             className="flex items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/15 px-3 py-1.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/25"
@@ -255,6 +275,7 @@ export function App() {
       {activeTab === 'meeting' && (
         <MeetingRoomView
           userProfile={userProfile}
+          requiredRoles={requiredRoles}
           agents={agents}
           rooms={rooms}
           selectedRoomId={selectedRoomId}

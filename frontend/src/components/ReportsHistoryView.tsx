@@ -138,7 +138,7 @@ export function ReportsHistoryView({
             아직 실행된 벤치마크 시나리오 히스토리가 없습니다
           </h2>
           <p className="mt-1 text-xs text-slate-400">
-            에이전트 미팅룸에서 주제를 발제하거나 `[4개 에이전트 협업 시뮬레이션]`을 실행해 승인을 완료하면 비교 리포트가 자동 생성됩니다.
+            에이전트 미팅룸에서 주제를 발제하고 에이전트들이 논의해 제출한 시나리오를 승인하면 비교 리포트가 자동 생성됩니다.
           </p>
         </div>
       ) : (
@@ -203,7 +203,7 @@ export function ReportsHistoryView({
                   </div>
                   {campReport && (
                     <a
-                      href={`/api/reports/${campReport.id}/export.md`}
+                      href={api.reportExportUrl(campReport.id)}
                       download
                       className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-emerald-500"
                     >

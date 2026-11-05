@@ -192,7 +192,9 @@ for item in watched:
     repo_path = item.get("repo_path")
     if kind == "k8s_dgd":
         name = item.get("name", "")
-        y = run_cmd(f"kubectl get dgd {name} -n {ns} -o yaml")
+        y = run_cmd(f"kubectl get dgd {name} -n {ns} -o yaml") if name else ""
+        if not y:
+            y = run_cmd(f"kubectl get dgd -n {ns} -o yaml")
         if y:
             configs[repo_path] = y
     elif kind == "file":
@@ -242,14 +244,30 @@ class SSHGateway:
         db: Database,
         git_store: EmbeddedGitStore,
         broadcast_fn: BroadcastCallback | None = None,
+        simulation_mode: bool = False,
+        benchmark_logs_dir: Path | None = None,
     ) -> None:
         self.db = db
         self.git_store = git_store
         self._broadcast_fn = broadcast_fn
+        self.simulation_mode = simulation_mode
+        self.benchmark_logs_dir = benchmark_logs_dir or settings.benchmark_logs_dir
         self._pool: dict[str, Any] = {}
         self._server_locks: dict[str, asyncio.Lock] = {}
         self._sim_configs: dict[str, str] = {}
-        self._bootstrap_initial_configs()
+        if self.simulation_mode:
+            self._bootstrap_initial_configs()
+
+    def _is_sim(self, server: dict[str, Any]) -> bool:
+        return self.simulation_mode or server.get("connection_mode") == "simulation"
+
+    def invalidate_connection(self, server_id: str) -> None:
+        conn = self._pool.pop(server_id, None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def set_broadcaster(self, fn: BroadcastCallback) -> None:
         self._broadcast_fn = fn
@@ -310,13 +328,10 @@ class SSHGateway:
             "known_hosts": None,
             "connect_timeout": 10,
         }
-        key_path = (server.get("ssh_key_path") or "").strip()
-        if key_path:
-            expanded = os.path.expanduser(key_path)
-            if os.path.exists(expanded):
-                kwargs["client_keys"] = [expanded]
-        if server.get("ssh_password"):
-            kwargs["password"] = server["ssh_password"]
+        pw = server.get("ssh_password")
+        if pw:
+            kwargs["password"] = pw
+            kwargs["preferred_auth"] = ["password", "keyboard-interactive", "publickey"]
 
         conn = await asyncssh.connect(**kwargs)
         self._pool[sid] = conn
@@ -328,34 +343,64 @@ class SSHGateway:
         command: str,
         input_text: str | None = None,
         timeout: int = 120,
+        use_pool: bool = True,
     ) -> tuple[str, str, int]:
-        """Run a remote command via `asyncssh` pool or system OpenSSH (`ssh` CLI) fallback."""
-        use_cli = server.get("connection_mode") == "ssh_cli" or asyncssh is None
-        if not use_cli:
-            conn = await self._get_ssh_conn(server)
-            res = await conn.run(command, input=input_text, check=False, timeout=timeout)
-            return (res.stdout or "", res.stderr or "", int(res.exit_status or 0))
+        """Run a remote command via standard SSH (WinSCP-style host/port/user/password)."""
+        if asyncssh is not None:
+            if use_pool and server.get("id"):
+                try:
+                    conn = await self._get_ssh_conn(server)
+                    res = await conn.run(command, input=input_text, check=False, timeout=timeout)
+                    return (res.stdout or "", res.stderr or "", int(res.exit_status or 0))
+                except Exception:
+                    self.invalidate_connection(server["id"])
+                    conn = await self._get_ssh_conn(server)
+                    res = await conn.run(command, input=input_text, check=False, timeout=timeout)
+                    return (res.stdout or "", res.stderr or "", int(res.exit_status or 0))
+            else:
+                kwargs: dict[str, Any] = {
+                    "host": server["host"],
+                    "port": int(server.get("ssh_port", 22)),
+                    "username": server.get("ssh_user") or "ubuntu",
+                    "known_hosts": None,
+                    "connect_timeout": 10,
+                }
+                if server.get("ssh_password"):
+                    kwargs["password"] = server["ssh_password"]
+                    kwargs["preferred_auth"] = ["password", "keyboard-interactive", "publickey"]
+                async with asyncssh.connect(**kwargs) as conn:
+                    res = await conn.run(command, input=input_text, check=False, timeout=timeout)
+                    return (res.stdout or "", res.stderr or "", int(res.exit_status or 0))
 
         ssh_bin = shutil.which("ssh")
         if not ssh_bin:
-            raise RuntimeError("시스템에 'ssh' 바이너리 또는 'asyncssh' 패키지가 없습니다.")
+            raise RuntimeError("시스템에 'asyncssh' 패키지 또는 'ssh' 클라이언트가 설치되어 있지 않습니다.")
 
-        args = [
-            ssh_bin,
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "ConnectTimeout=10",
-            "-p",
-            str(int(server.get("ssh_port", 22))),
-        ]
-        key_path = (server.get("ssh_key_path") or "").strip()
-        if key_path:
-            expanded = os.path.expanduser(key_path)
-            if os.path.exists(expanded):
-                args.extend(["-i", expanded])
+        pw = server.get("ssh_password") or ""
+        sshpass_bin = shutil.which("sshpass") if pw else None
+        env = dict(os.environ)
+        args: list[str] = []
+        if pw and sshpass_bin:
+            env["SSHPASS"] = pw
+            args.extend([sshpass_bin, "-e"])
+        elif pw and not sshpass_bin:
+            raise RuntimeError("비밀번호 기반 SSH 연결을 위해 Python 'asyncssh' 패키지(또는 리눅스 'sshpass')가 필요합니다.")
+
+        args.extend(
+            [
+                ssh_bin,
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "ConnectTimeout=10",
+                "-p",
+                str(int(server.get("ssh_port", 22))),
+            ]
+        )
+        if not pw:
+            args.extend(["-o", "BatchMode=yes"])
 
         user_prefix = f"{server['ssh_user']}@" if server.get("ssh_user") else ""
         args.extend([f"{user_prefix}{server['host']}", command])
@@ -365,6 +410,7 @@ class SSHGateway:
             stdin=asyncio.subprocess.PIPE if input_text is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(input=input_text.encode("utf-8") if input_text is not None else None),
@@ -375,6 +421,55 @@ class SSHGateway:
             stderr_b.decode("utf-8", errors="replace"),
             int(proc.returncode or 0),
         )
+
+    async def test_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Test WinSCP-style SSH connectivity (host, port, user, password)."""
+        host = (payload.get("host") or "").strip()
+        port = int(payload.get("ssh_port") or 22)
+        user = (payload.get("ssh_user") or "ubuntu").strip()
+        password = payload.get("ssh_password") or ""
+        if not password and payload.get("id"):
+            saved = self.db.get_server(str(payload["id"]), include_secret=True)
+            if saved:
+                password = saved.get("ssh_password") or ""
+
+        if not host:
+            return {"ok": False, "error": "호스트 IP 또는 도메인을 입력해 주세요."}
+
+        t0 = time.perf_counter()
+        if self.simulation_mode:
+            await asyncio.sleep(0.06)
+            ms = int((time.perf_counter() - t0) * 1000)
+            return {
+                "ok": True,
+                "banner": f"[시뮬레이션] {user}@{host}:{port} 가상 SSH 핸드셰이크 성공 (Ubuntu 24.04 LTS)",
+                "latency_ms": ms,
+            }
+
+        temp_srv = {
+            "host": host,
+            "ssh_port": port,
+            "ssh_user": user,
+            "ssh_password": password,
+        }
+        try:
+            out, err, code = await self._run_remote(
+                temp_srv,
+                "uname -sr && hostname",
+                timeout=10,
+                use_pool=False,
+            )
+            ms = int((time.perf_counter() - t0) * 1000)
+            if code != 0:
+                return {"ok": False, "error": err.strip() or f"원격 명령 종료 코드 {code}"}
+            summary = " · ".join(x.strip() for x in out.splitlines() if x.strip())
+            return {
+                "ok": True,
+                "banner": f"{user}@{host}:{port} 연결 성공 ({summary})",
+                "latency_ms": ms,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def _build_simulated_state(
         self, server: dict[str, Any]
@@ -389,11 +484,19 @@ class SSHGateway:
                 active_configs[rpath] = tree[rpath]
             elif rpath in self._sim_configs:
                 active_configs[rpath] = self._sim_configs[rpath]
+            elif server["server_role"] == "GPU":
+                active_configs[rpath] = (
+                    DEFAULT_GPU_DGD_YAML if "dgd" in rpath else DEFAULT_LMCACHE_YAML
+                )
+            else:
+                active_configs[rpath] = (
+                    DEFAULT_MOONCAKE_YAML if "mooncake" in rpath else DEFAULT_CXL_ENV
+                )
 
         if server["server_role"] == "GPU":
             # Parse TP size & offload tier from active configs so UI reflects live agent mutations!
-            dgd_text = active_configs.get("gpu-node-01/k8s/dgd-active.yaml", DEFAULT_GPU_DGD_YAML)
-            lmc_text = active_configs.get("gpu-node-01/configs/lmcache_config.yaml", DEFAULT_LMCACHE_YAML)
+            dgd_text = active_configs.get(f"{sid}/k8s/dgd-active.yaml", DEFAULT_GPU_DGD_YAML)
+            lmc_text = active_configs.get(f"{sid}/configs/lmcache_config.yaml", DEFAULT_LMCACHE_YAML)
             tp_size = "4"
             try:
                 parsed_lmc = yaml.safe_load(lmc_text) or {}
@@ -457,7 +560,7 @@ class SSHGateway:
             return hw_specs, sw_specs, active_configs
 
         # REMOTE Memory Server
-        mc_text = active_configs.get("remote-mem-01/configs/mooncake_store.yaml", DEFAULT_MOONCAKE_YAML)
+        mc_text = active_configs.get(f"{sid}/configs/mooncake_store.yaml", DEFAULT_MOONCAKE_YAML)
         try:
             parsed_mc = yaml.safe_load(mc_text) or {}
             active_dest = parsed_mc.get("storage_tier", {}).get("active_destination", "CXL_MEMORY")
@@ -541,7 +644,7 @@ class SSHGateway:
                     ),
                 }
 
-        if server["connection_mode"] == "simulation":
+        if self._is_sim(server):
             await asyncio.sleep(0.08)
             hw_specs, sw_specs, active_configs = self._build_simulated_state(server)
         else:
@@ -612,7 +715,7 @@ class SSHGateway:
             )
 
         t0 = time.perf_counter()
-        if server["connection_mode"] == "simulation":
+        if self._is_sim(server):
             await asyncio.sleep(0.15)
             stdout, stderr, exit_code = self._simulate_ssh_command(server, command)
         else:
@@ -701,7 +804,7 @@ class SSHGateway:
                 (w for w in server.get("watched_configs", []) if w.get("repo_path") == clean_repo_path),
                 None,
             )
-            if server["connection_mode"] != "simulation":
+            if not self._is_sim(server):
                 if matched_watch and matched_watch.get("kind") == "k8s_dgd":
                     ns = server.get("k8s_namespace", "default")
                     _, stderr_s, exit_c = await self._run_remote(
@@ -781,7 +884,7 @@ class SSHGateway:
             srv = self.db.get_server(sid, include_secret=True)
             if not srv:
                 continue
-            if srv["connection_mode"] != "simulation":
+            if not self._is_sim(srv):
                 for w in srv.get("watched_configs", []):
                     rpath = w.get("repo_path")
                     if rpath not in restored_files:
@@ -874,7 +977,7 @@ class SSHGateway:
             assert server is not None
 
             t0 = time.perf_counter()
-            if server["connection_mode"] == "simulation":
+            if self._is_sim(server):
                 await asyncio.sleep(0.35)
                 raw_output, sim_metrics = self._simulate_benchmark(variant_label, offload_target, command)
                 exit_code = 0
@@ -886,7 +989,7 @@ class SSHGateway:
                 sim_metrics = self._try_extract_metrics_from_stdout(raw_output)
 
             duration_ms = int((time.perf_counter() - t0) * 1000)
-            log_file = settings.benchmark_logs_dir / f"{run_rec['id']}.log"
+            log_file = self.benchmark_logs_dir / f"{run_rec['id']}.log"
             log_file.write_text(raw_output + ("\n" + stderr if stderr else ""), encoding="utf-8")
 
             audit = self.db.add_ssh_audit_log(

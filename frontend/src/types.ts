@@ -5,6 +5,12 @@ export interface UserProfile {
   avatar_color: string
 }
 
+export interface RequiredRoleInfo {
+  code: string
+  name: string
+  description: string
+}
+
 export interface AgentInfo {
   id: string
   name: string
@@ -91,9 +97,10 @@ export interface ServerInfo {
   host: string
   ssh_port: number
   ssh_user: string
-  ssh_key_path: string
+  ssh_key_path?: string
+  has_password?: boolean
   server_role: 'GPU' | 'REMOTE' | string
-  connection_mode: 'simulation' | 'ssh' | string
+  connection_mode?: string
   k8s_namespace: string
   watched_configs: WatchedConfigItem[]
   lock_status: 'FREE' | 'SETUP_LOCKED' | 'BENCHMARK_RUNNING' | string
@@ -257,7 +264,9 @@ export interface BenchmarkReport {
 }
 
 export interface BootstrapResponse {
+  mode: 'live' | 'sim'
   identity: { actor_id: string; auth_mode: string }
+  required_roles: RequiredRoleInfo[]
   users: UserProfile[]
   agents: AgentInfo[]
   rooms: RoomInfo[]

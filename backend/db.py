@@ -16,8 +16,9 @@ def utc_now_iso() -> str:
 class Database:
     """SQLite (WAL mode) repository for the Agent Meeting Room & Benchmark Hub."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, seed_demo_servers: bool = False) -> None:
         self.db_path = db_path
+        self.seed_demo_servers = seed_demo_servers
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -191,10 +192,10 @@ class Database:
         user_count = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if user_count == 0:
             users = [
-                ("member_a", "팀원 A (GPU 인프라)", "GPU System Engineer", "#3b82f6"),
-                ("member_b", "팀원 B (메모리/CXL)", "Memory Architecture Eng", "#10b981"),
-                ("member_c", "팀원 C (서빙/DGD)", "LLM Serving Engineer", "#f59e0b"),
-                ("member_d", "팀원 D (성능평가/리드)", "Benchmark Tech Lead", "#8b5cf6"),
+                ("member_a", "팀원 A", "Team Member", "#3b82f6"),
+                ("member_b", "팀원 B", "Team Member", "#10b981"),
+                ("member_c", "팀원 C", "Team Member", "#f59e0b"),
+                ("member_d", "팀원 D", "Team Member", "#8b5cf6"),
             ]
             cur.executemany(
                 "INSERT INTO users (id, name, role_label, avatar_color) VALUES (?, ?, ?, ?)",
@@ -204,34 +205,10 @@ class Database:
         agent_count = cur.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
         if agent_count == 0:
             agents = [
-                (
-                    "agent_a",
-                    "Agent A",
-                    "member_a",
-                    "ROLE_GPU",
-                    "GPU 서버 토폴로지(TP4)·MIG·클럭·K8s GPU 파드 점검 및 설정",
-                ),
-                (
-                    "agent_b",
-                    "Agent B",
-                    "member_b",
-                    "ROLE_REMOTE",
-                    "리모트 서버 Mooncake Store 데몬, CXL Memory(NUMA/DAX)·DRAM·NVMe SSD 구성",
-                ),
-                (
-                    "agent_c",
-                    "Agent C",
-                    "member_c",
-                    "ROLE_CONFIG",
-                    "K8s DynamoGraphDeployment(DGD) 매니페스트 및 LMCache/Mooncake YAML 작성·배포",
-                ),
-                (
-                    "agent_d",
-                    "Agent D",
-                    "member_d",
-                    "ROLE_ORCH",
-                    "미팅룸 총괄 진행, 시나리오 취합, 벤치마크 순차 구동 및 비교 리포트 생성",
-                ),
+                ("agent_a", "Agent A", "member_a", "", "회의 논의를 통해 담당 역할 결정"),
+                ("agent_b", "Agent B", "member_b", "", "회의 논의를 통해 담당 역할 결정"),
+                ("agent_c", "Agent C", "member_c", "", "회의 논의를 통해 담당 역할 결정"),
+                ("agent_d", "Agent D", "member_d", "", "회의 논의를 통해 담당 역할 결정"),
             ]
             cur.executemany(
                 """
@@ -240,6 +217,15 @@ class Database:
                 """,
                 agents,
             )
+        else:
+            # Normalize any legacy pre-fixed primary_role entries from v1.0.0
+            cur.execute(
+                """
+                UPDATE agents
+                SET primary_role = '', specialty_desc = '회의 논의를 통해 담당 역할 결정'
+                WHERE primary_role != ''
+                """
+            )
 
         room_count = cur.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
         now = utc_now_iso()
@@ -247,10 +233,10 @@ class Database:
             rooms = [
                 ("room-main", "전체 에이전트 미팅룸 (벤치마크 기획·실행)", "group", None, "IDLE", now),
                 ("room-cxl-eval", "CXL vs DRAM vs SSD 오프로딩 평가방", "group", None, "IDLE", now),
-                ("room-dm-agent-a", "1:1 대화 · Agent A (GPU 서버)", "direct", "agent_a", "IDLE", now),
-                ("room-dm-agent-b", "1:1 대화 · Agent B (리모트/메모리)", "direct", "agent_b", "IDLE", now),
-                ("room-dm-agent-c", "1:1 대화 · Agent C (DGD/YAML)", "direct", "agent_c", "IDLE", now),
-                ("room-dm-agent-d", "1:1 대화 · Agent D (총괄/벤치마크)", "direct", "agent_d", "IDLE", now),
+                ("room-dm-agent-a", "1:1 대화 · Agent A", "direct", "agent_a", "IDLE", now),
+                ("room-dm-agent-b", "1:1 대화 · Agent B", "direct", "agent_b", "IDLE", now),
+                ("room-dm-agent-c", "1:1 대화 · Agent C", "direct", "agent_c", "IDLE", now),
+                ("room-dm-agent-d", "1:1 대화 · Agent D", "direct", "agent_d", "IDLE", now),
             ]
             cur.executemany(
                 """
@@ -258,6 +244,11 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 rooms,
+            )
+            welcome_note = (
+                "시뮬레이션 모드(`/sim`) 미팅룸이 준비되었습니다. 채팅창에 벤치마크 주제를 입력하면 에이전트들이 논의를 통해 분담 역할을 자율 결정하고 시나리오 제안부터 가상 실행·리포트까지 실제 운영 모드와 동일하게 테스트할 수 있습니다."
+                if self.seed_demo_servers
+                else "에이전트 미팅룸이 준비되었습니다. 주제를 발제하면 접속 중인 에이전트들이 논의를 통해 필요한 역할 목록(총괄·벤치마크, GPU 서버, 리모트·메모리, DGD·YAML)을 각자 나누어 맡고 시나리오를 구성합니다."
             )
             cur.execute(
                 """
@@ -272,26 +263,20 @@ class Database:
                     "시스템 안내",
                     "SYSTEM",
                     "system",
-                    "에이전트 미팅룸이 준비되었습니다. 각 팀원의 Claude Code / Hermes에서 MCP 서버(`/mcp`)를 연결해 대기 모드로 입장하거나, 채팅창에 벤치마크 주제를 입력해 회의를 시작하세요.",
+                    welcome_note,
                     "{}",
                     now,
                 ),
             )
 
         server_count = cur.execute("SELECT COUNT(*) FROM servers").fetchone()[0]
-        if server_count == 0:
+        if server_count == 0 and self.seed_demo_servers:
             gpu_watched = json.dumps(
-                [
-                    {"kind": "k8s_dgd", "name": "vllm-disagg-tp4", "repo_path": "gpu-node-01/k8s/dgd-active.yaml"},
-                    {"kind": "file", "remote_path": "/etc/lmcache/lmcache_config.yaml", "repo_path": "gpu-node-01/configs/lmcache_config.yaml"},
-                ],
+                self.default_watched_configs("gpu-node-01", "GPU"),
                 ensure_ascii=False,
             )
             remote_watched = json.dumps(
-                [
-                    {"kind": "file", "remote_path": "/etc/mooncake/mooncake_store.yaml", "repo_path": "remote-mem-01/configs/mooncake_store.yaml"},
-                    {"kind": "file", "remote_path": "/etc/mooncake/cxl_tiering.env", "repo_path": "remote-mem-01/configs/cxl_tiering.env"},
-                ],
+                self.default_watched_configs("remote-mem-01", "REMOTE"),
                 ensure_ascii=False,
             )
             servers = [
@@ -301,10 +286,10 @@ class Database:
                     "10.20.30.101",
                     22,
                     "ubuntu",
-                    "~/.ssh/id_ed25519",
                     "",
+                    "sim-password",
                     "GPU",
-                    "simulation",
+                    "ssh",
                     "dynamo-llm",
                     gpu_watched,
                     "FREE",
@@ -316,10 +301,10 @@ class Database:
                     "10.20.30.102",
                     22,
                     "ubuntu",
-                    "~/.ssh/id_ed25519",
                     "",
+                    "sim-password",
                     "REMOTE",
-                    "simulation",
+                    "ssh",
                     "dynamo-llm",
                     remote_watched,
                     "FREE",
@@ -337,6 +322,18 @@ class Database:
             )
 
         self._conn.commit()
+
+    @staticmethod
+    def default_watched_configs(server_id: str, server_role: str) -> list[dict[str, Any]]:
+        if server_role == "GPU":
+            return [
+                {"kind": "k8s_dgd", "name": "vllm-disagg-tp4", "repo_path": f"{server_id}/k8s/dgd-active.yaml"},
+                {"kind": "file", "remote_path": "/etc/lmcache/lmcache_config.yaml", "repo_path": f"{server_id}/configs/lmcache_config.yaml"},
+            ]
+        return [
+            {"kind": "file", "remote_path": "/etc/mooncake/mooncake_store.yaml", "repo_path": f"{server_id}/configs/mooncake_store.yaml"},
+            {"kind": "file", "remote_path": "/etc/mooncake/cxl_tiering.env", "repo_path": f"{server_id}/configs/cxl_tiering.env"},
+        ]
 
     def fetch_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         with self._lock:
@@ -404,6 +401,9 @@ class Database:
             "UPDATE agents SET assigned_roles_json = ? WHERE id = ?",
             (json.dumps(roles, ensure_ascii=False), agent_id),
         )
+
+    def clear_all_agent_roles(self) -> None:
+        self.execute("UPDATE agents SET assigned_roles_json = '[]'")
 
     def list_rooms(self) -> list[dict[str, Any]]:
         return self.fetch_all("SELECT * FROM rooms ORDER BY room_type DESC, id ASC")
@@ -610,6 +610,7 @@ class Database:
         rows = self.fetch_all("SELECT * FROM servers ORDER BY id")
         for r in rows:
             r["watched_configs"] = json.loads(r.pop("watched_configs_json") or "[]")
+            r["has_password"] = bool(r.get("ssh_password"))
             r.pop("ssh_password", None)
         return rows
 
@@ -618,6 +619,7 @@ class Database:
         if not r:
             return None
         r["watched_configs"] = json.loads(r.pop("watched_configs_json") or "[]")
+        r["has_password"] = bool(r.get("ssh_password"))
         if not include_secret:
             r.pop("ssh_password", None)
         return r
@@ -626,21 +628,31 @@ class Database:
         sid = payload.get("id") or f"srv-{uuid.uuid4().hex[:6]}"
         existing = self.get_server(sid, include_secret=True)
         now = utc_now_iso()
-        watched = payload.get(
-            "watched_configs",
-            existing["watched_configs"] if existing else [],
-        )
-        password = payload.get("ssh_password")
-        if password is None and existing:
+        s_role = payload.get("server_role", existing["server_role"] if existing else "GPU")
+        watched = payload.get("watched_configs")
+        if not watched:
+            watched = (
+                existing["watched_configs"]
+                if existing and existing.get("watched_configs")
+                else self.default_watched_configs(sid, s_role)
+            )
+
+        raw_pw = payload.get("ssh_password")
+        if payload.get("clear_password"):
+            password = ""
+        elif raw_pw:
+            password = raw_pw
+        elif existing:
             password = existing.get("ssh_password", "")
-        password = password or ""
+        else:
+            password = ""
 
         if existing:
             self.execute(
                 """
                 UPDATE servers
-                SET name = ?, host = ?, ssh_port = ?, ssh_user = ?, ssh_key_path = ?,
-                    ssh_password = ?, server_role = ?, connection_mode = ?, k8s_namespace = ?,
+                SET name = ?, host = ?, ssh_port = ?, ssh_user = ?, ssh_key_path = '',
+                    ssh_password = ?, server_role = ?, connection_mode = 'ssh', k8s_namespace = ?,
                     watched_configs_json = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -649,10 +661,8 @@ class Database:
                     payload.get("host", existing["host"]),
                     int(payload.get("ssh_port", existing["ssh_port"])),
                     payload.get("ssh_user", existing["ssh_user"]),
-                    payload.get("ssh_key_path", existing["ssh_key_path"]),
                     password,
-                    payload.get("server_role", existing["server_role"]),
-                    payload.get("connection_mode", existing["connection_mode"]),
+                    s_role,
                     payload.get("k8s_namespace", existing["k8s_namespace"]),
                     json.dumps(watched, ensure_ascii=False),
                     now,
@@ -665,7 +675,7 @@ class Database:
                 INSERT INTO servers (
                     id, name, host, ssh_port, ssh_user, ssh_key_path, ssh_password,
                     server_role, connection_mode, k8s_namespace, watched_configs_json, lock_status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FREE', ?)
+                ) VALUES (?, ?, ?, ?, ?, '', ?, ?, 'ssh', ?, ?, 'FREE', ?)
                 """,
                 (
                     sid,
@@ -673,16 +683,18 @@ class Database:
                     payload["host"],
                     int(payload.get("ssh_port", 22)),
                     payload.get("ssh_user", "ubuntu"),
-                    payload.get("ssh_key_path", ""),
                     password,
-                    payload.get("server_role", "GPU"),
-                    payload.get("connection_mode", "ssh"),
+                    s_role,
                     payload.get("k8s_namespace", "dynamo-llm"),
                     json.dumps(watched, ensure_ascii=False),
                     now,
                 ),
             )
         return self.get_server(sid)  # type: ignore[return-value]
+
+    def delete_server(self, server_id: str) -> None:
+        self.execute("DELETE FROM env_snapshots WHERE server_id = ?", (server_id,))
+        self.execute("DELETE FROM servers WHERE id = ?", (server_id,))
 
     def set_server_lock(
         self, server_id: str, lock_status: str, holder: str | None = None, reason: str | None = None

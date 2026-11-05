@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .auth import resolve_identity
 from .db import Database
 from .git_store import EmbeddedGitStore
-from .orchestrator import MeetingRoomOrchestrator
+from .orchestrator import REQUIRED_ROLES, MeetingRoomOrchestrator
 from .ssh_gateway import SSHGateway
 
 
@@ -71,9 +71,32 @@ MCP_TOOLS_SCHEMA: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "set_agreed_roles",
+        "description": (
+            "회의 논의(DISCUSSION)를 통해 에이전트들이 나눠 맡기로 합의한 역할을 등록합니다. "
+            "호출 즉시 미팅룸 좌측의 [분담 대상 역할 목록]과 각 에이전트 카드에 배정 현황이 실시간 표시됩니다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "room_id": {"type": "string", "description": "채팅방 ID (예: room-main)"},
+                "role_map": {
+                    "type": "object",
+                    "description": "역할 코드별 담당 에이전트 ID 매핑 (예: {'ROLE_ORCH':'agent_d','ROLE_GPU':'agent_a','ROLE_REMOTE':'agent_b','ROLE_CONFIG':'agent_c'})",
+                },
+                "partial": {
+                    "type": "boolean",
+                    "description": "True이면 기존 배정을 유지한 채 일부 역할만 추가/갱신",
+                },
+            },
+            "required": ["room_id", "role_map"],
+        },
+    },
+    {
         "name": "submit_scenario_proposal",
         "description": (
-            "총괄(ROLE_ORCH) 에이전트가 팀원 논의 결과를 취합해 사용자 승인 대기 카드를 제출합니다. "
+            "논의를 통해 총괄(ROLE_ORCH)을 맡은 에이전트가 합의된 역할 분담과 실행 계획을 취합해 사용자 승인 대기 카드를 제출합니다. "
             "호출 즉시 회의 상태가 APPROVAL_PENDING으로 전환되며 사용자의 승인을 기다립니다."
         ),
         "inputSchema": {
@@ -82,6 +105,10 @@ MCP_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "agent_id": {"type": "string"},
                 "room_id": {"type": "string"},
                 "title": {"type": "string", "description": "벤치마크 시나리오 제목"},
+                "role_map": {
+                    "type": "object",
+                    "description": "논의로 결정된 역할 코드별 에이전트 ID (예: {'ROLE_ORCH':'agent_d','ROLE_GPU':'agent_a','ROLE_REMOTE':'agent_b','ROLE_CONFIG':'agent_c'})",
+                },
                 "role_assignments": {
                     "type": "object",
                     "description": "역할/에이전트별 담당 업무 요약 맵",
@@ -257,6 +284,7 @@ def create_mcp_router(
     git_store: EmbeddedGitStore,
     ssh_gateway: SSHGateway,
     orchestrator: MeetingRoomOrchestrator,
+    mount_prefix: str = "",
 ) -> APIRouter:
     router = APIRouter()
     sse_sessions: dict[str, tuple[asyncio.Queue[dict[str, Any]], dict[str, str]]] = {}
@@ -285,10 +313,20 @@ def create_mcp_router(
             )
             return {
                 "room": room,
+                "required_roles": REQUIRED_ROLES,
                 "agents": db.list_agents(),
                 "active_campaign": active_camp,
                 "recent_messages": db.list_messages(rid, limit=int(args.get("limit", 30))),
             }
+
+        if name == "set_agreed_roles":
+            orchestrator.touch_agent(agent_id, client_type=client_hint, working=True)
+            agreed = await orchestrator.set_agreed_roles(
+                room_id=args["room_id"],
+                role_map=args.get("role_map") or {},
+                partial=bool(args.get("partial", False)),
+            )
+            return {"agreed_roles": agreed, "agents": db.list_agents()}
 
         if name == "post_message":
             return await orchestrator.handle_agent_message(
@@ -307,6 +345,7 @@ def create_mcp_router(
                 steps_dag=args.get("steps_dag", []),
                 target_configs_preview=args.get("target_configs_preview", {}),
                 summary_comment=args.get("summary_comment", ""),
+                role_map=args.get("role_map"),
             )
 
         if name == "complete_scenario_step":
@@ -565,7 +604,7 @@ def create_mcp_router(
 
         async def event_gen():
             try:
-                yield f"event: endpoint\ndata: /mcp/messages?{query_suffix}\n\n"
+                yield f"event: endpoint\ndata: {mount_prefix}/mcp/messages?{query_suffix}\n\n"
                 while True:
                     try:
                         msg = await asyncio.wait_for(q.get(), timeout=20)

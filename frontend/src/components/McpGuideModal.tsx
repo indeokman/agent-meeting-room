@@ -1,5 +1,6 @@
 import { Check, Copy, Plug, Terminal, X } from 'lucide-react'
 import { useState } from 'react'
+import { api, IS_SIM_MODE } from '../api'
 
 interface Props {
   open: boolean
@@ -9,7 +10,7 @@ interface Props {
 const STANDBY_PROMPT = `미팅룸 대기 모드로 입장해 줘.
 1. wait_for_turn MCP 툴을 호출해 내 차례가 올 때까지 대기해.
 2. HEARTBEAT_IDLE 상태가 반환되면 별도 설명 출력 없이 즉시 wait_for_turn을 다시 호출해.
-3. YOUR_TURN 상태가 반환되면 instruction 지침과 내 담당 역할(your_assigned_roles)에 맞춰 get_environment_snapshot, ssh_exec, update_server_config, run_benchmark_step, post_message, submit_scenario_proposal, complete_scenario_step, publish_benchmark_report 중 필요한 툴을 실행한 뒤, 작업이 끝나자마자 다시 wait_for_turn을 호출해 대기 상태를 유지해.`
+3. YOUR_TURN 상태가 반환되면 instruction 지침과 분담 대상 역할 목록(required_roles)을 확인해 동료 에이전트들과 논의를 통해 맡을 역할을 합의(set_agreed_roles)하고, get_environment_snapshot, ssh_exec, update_server_config, run_benchmark_step, post_message, submit_scenario_proposal, complete_scenario_step, publish_benchmark_report 중 필요한 툴을 실행한 뒤, 작업이 끝나자마자 다시 wait_for_turn을 호출해 대기 상태를 유지해.`
 
 export function McpGuideModal({ open, onClose }: Props) {
   const [selectedAgent, setSelectedAgent] = useState('agent_a')
@@ -17,9 +18,9 @@ export function McpGuideModal({ open, onClose }: Props) {
 
   if (!open) return null
 
-  const origin = window.location.origin
-  const mcpUrl = `${origin}/mcp?agent_id=${selectedAgent}`
-  const claudeCmd = `MCP_TOOL_TIMEOUT=1800000 claude mcp add --transport http amr-${selectedAgent} "${mcpUrl}"`
+  const mcpUrl = api.mcpUrl(selectedAgent)
+  const serverAlias = IS_SIM_MODE ? `amr-sim-${selectedAgent}` : `amr-${selectedAgent}`
+  const claudeCmd = `MCP_TOOL_TIMEOUT=1800000 claude mcp add --transport http ${serverAlias} "${mcpUrl}"`
   const hermesYaml = `mcp_servers:
   agent_meeting_room:
     transport: streamable_http
@@ -45,7 +46,7 @@ export function McpGuideModal({ open, onClose }: Props) {
                 개인 에이전트 (Claude Code · Hermes) MCP 연동 가이드
               </h2>
               <p className="text-xs text-slate-400">
-                사내 폐쇄형 LLM과 연동된 각 팀원의 에이전트를 단일 포트 MCP 대기 루프로 연결합니다.
+                사내 폐쇄형 LLM과 연동된 각 팀원의 에이전트를 단일 포트 MCP 대기 루프로 연결하며, 담당 역할은 회의 논의를 통해 결정됩니다.
               </p>
             </div>
           </div>
@@ -60,14 +61,14 @@ export function McpGuideModal({ open, onClose }: Props) {
         <div className="space-y-5 p-6 text-sm">
           <div>
             <label className="mb-2 block text-xs font-semibold tracking-wider text-slate-400 uppercase">
-              1. 연결할 담당 에이전트 선택
+              1. 연결할 에이전트 슬롯 선택 (역할은 회의 시작 후 논의로 분담)
             </label>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {[
-                { id: 'agent_a', label: 'Agent A · GPU 서버' },
-                { id: 'agent_b', label: 'Agent B · 리모트/CXL' },
-                { id: 'agent_c', label: 'Agent C · DGD/YAML' },
-                { id: 'agent_d', label: 'Agent D · 총괄/벤치마크' },
+                { id: 'agent_a', label: 'Agent A (팀원 A)' },
+                { id: 'agent_b', label: 'Agent B (팀원 B)' },
+                { id: 'agent_c', label: 'Agent C (팀원 C)' },
+                { id: 'agent_d', label: 'Agent D (팀원 D)' },
               ].map((item) => (
                 <button
                   key={item.id}

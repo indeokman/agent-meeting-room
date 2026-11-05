@@ -10,12 +10,19 @@ import type {
   ServerInfo,
 } from './types'
 
+export const IS_SIM_MODE =
+  window.location.pathname === '/sim' ||
+  window.location.pathname.startsWith('/sim/')
+
+export const API_PREFIX = IS_SIM_MODE ? '/sim' : ''
+
 async function requestJson<T>(
   url: string,
   userProfile: string,
   options?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(url, {
+  const fullUrl = url.startsWith('/api/') ? `${API_PREFIX}${url}` : url
+  const res = await fetch(fullUrl, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -31,6 +38,17 @@ async function requestJson<T>(
 }
 
 export const api = {
+  wsUrl: () => {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//${window.location.host}${API_PREFIX}/ws`
+  },
+
+  mcpUrl: (agentId: string) =>
+    `${window.location.origin}${API_PREFIX}/mcp?agent_id=${encodeURIComponent(agentId)}`,
+
+  reportExportUrl: (reportId: string) =>
+    `${API_PREFIX}/api/reports/${encodeURIComponent(reportId)}/export.md`,
+
   bootstrap: (userProfile: string) =>
     requestJson<BootstrapResponse>('/api/bootstrap', userProfile),
 
@@ -54,16 +72,6 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify({ content, user_id: userProfile }),
-      },
-    ),
-
-  simulateMeeting: (userProfile: string, roomId: string, topic?: string) =>
-    requestJson<{ status: string }>(
-      `/api/rooms/${roomId}/simulate`,
-      userProfile,
-      {
-        method: 'POST',
-        body: JSON.stringify({ topic, user_id: userProfile }),
       },
     ),
 
@@ -117,10 +125,38 @@ export const api = {
       body: JSON.stringify({ force }),
     }),
 
-  upsertServer: (userProfile: string, payload: Record<string, unknown>) =>
-    requestJson<{ server: ServerInfo }>('/api/servers', userProfile, {
+  testServerConnection: (
+    userProfile: string,
+    payload: {
+      id?: string
+      host: string
+      ssh_port: number
+      ssh_user: string
+      ssh_password?: string
+    },
+  ) =>
+    requestJson<{
+      ok: boolean
+      banner?: string
+      latency_ms?: number
+      error?: string
+    }>('/api/servers/test-connection', userProfile, {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  upsertServer: (userProfile: string, payload: Record<string, unknown>) =>
+    requestJson<{
+      server: ServerInfo
+      collect_warning?: string
+    }>('/api/servers', userProfile, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteServer: (userProfile: string, serverId: string) =>
+    requestJson<{ deleted: string }>(`/api/servers/${serverId}`, userProfile, {
+      method: 'DELETE',
     }),
 
   getConfigTree: (userProfile: string, commitHash?: string) =>
